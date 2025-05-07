@@ -349,13 +349,11 @@ source $PROJDIR/.env
 if [ $MODE -eq 1 ]; then
     export STEP="${STEP},3i"
     echo
-    echo "$ gcloud --project \$GCP_PROJECT beta container clusters create \$GCP_CLUSTER --zone \$GCP_ZONE --machine-type n1-standard-2 --num-nodes 5 --labels location=\$GCP_REGION --spot # to create container cluster" | pv -qL 100
+    echo "$ gcloud --project \$GCP_PROJECT beta container clusters create \$GCP_CLUSTER --zone \$GCP_ZONE --machine-type n1-standard-2 --num-nodes 5 --labels location=\$GCP_REGION --spot --gateway-api=standard # to create container cluster" | pv -qL 100
     echo      
     echo "$ gcloud --project \$GCP_PROJECT container clusters get-credentials \$GCP_CLUSTER --zone \$GCP_ZONE # to retrieve the credentials for cluster" | pv -qL 100
     echo
     echo "$ kubectl create clusterrolebinding cluster-admin-binding --clusterrole=cluster-admin --user=\"\$(gcloud config get-value core/account)\" # to enable current user to set RBAC rules" | pv -qL 100
-    echo
-    echo "$ kubectl get crd gateways.gateway.networking.k8s.io &> /dev/null || { kubectl kustomize \"github.com/kubernetes-sigs/gateway-api/config/crd/experimental?ref=v1.0.0\" | kubectl apply -f -; } # to install Kubernetes Gateway CRDs" | pv -qL 100
 elif [ $MODE -eq 2 ]; then
     export STEP="${STEP},3"   
     gcloud config set project $GCP_PROJECT > /dev/null 2>&1 
@@ -369,9 +367,6 @@ elif [ $MODE -eq 2 ]; then
     echo
     echo "$ kubectl create clusterrolebinding cluster-admin-binding --clusterrole=cluster-admin --user=\"\$(gcloud config get-value core/account)\" # to enable current user to set RBAC rules" | pv -qL 100
     kubectl create clusterrolebinding cluster-admin-binding --clusterrole=cluster-admin --user="$(gcloud config get-value core/account)"
-    # echo
-    # echo "$ kubectl get crd gateways.gateway.networking.k8s.io &> /dev/null || { kubectl kustomize \"github.com/kubernetes-sigs/gateway-api/config/crd/experimental?ref=v1.0.0\" | kubectl apply -f -; } # to install Kubernetes Gateway CRDs" | pv -qL 100
-    # kubectl get crd gateways.gateway.networking.k8s.io &> /dev/null || { kubectl kustomize "github.com/kubernetes-sigs/gateway-api/config/crd/experimental?ref=v1.0.0" | kubectl apply -f -; }  
 elif [ $MODE -eq 3 ]; then
     export STEP="${STEP},3x"   
     gcloud config set project $GCP_PROJECT > /dev/null 2>&1 
@@ -418,7 +413,7 @@ spec:
       - system-node-critical
 EOF # to defined ResourceQuota for the node-critical class" | pv -qL 100
     echo
-    echo "$ \$HOME/istio-\${ISTIO_VERSION}/bin/istioctl install --set profile=ambient --skip-confirmation # to install Istio" | pv -qL 100
+    echo "$ \$HOME/istio-\${ISTIO_VERSION}/bin/istioctl install --set profile=ambient --set \"components.ingressGateways[0].enabled=true\" --set \"components.ingressGateways[0].name=istio-ingressgateway\" --skip-confirmation # to install Istio" | pv -qL 100
     echo
     echo "$ kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-\${ISTIO_RELEASE_VERSION}/samples/addons/prometheus.yaml # to install addon" | pv -qL 100
     echo
@@ -589,6 +584,30 @@ if [ $MODE -eq 1 ]; then
     echo "$ kubectl -n \$APPLICATION_NAMESPACE apply -f \$HOME/istio-\${ISTIO_VERSION}/samples/bookinfo/platform/kube/bookinfo.yaml # to configure application" | pv -qL 100
     echo
     echo "$ kubectl -n \$APPLICATION_NAMESPACE apply -f \$HOME/istio-\${ISTIO_VERSION}/samples/bookinfo/platform/kube/bookinfo-versions.yaml # to configure application" | pv -qL 100
+    echo
+    echo "$ kubectl -n \$APPLICATION_NAMESPACE apply -f \$HOME/istio-\${ISTIO_VERSION}/samples/sleep/sleep.yaml # to configure application" | pv -qL 100
+    echo 
+    echo "$ kubectl apply -n \$APPLICATION_NAMESPACE -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notsleep
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notsleep
+  template:
+    metadata:
+      labels:
+        app: notsleep
+    spec:
+      containers:
+      - name: sleep
+        image: curlimages/curl
+        command: [\"/bin/sleep\",\"3650d\"]
+        imagePullPolicy: IfNotPresent
+EOF" | pv -qL 100
 elif [ $MODE -eq 2 ]; then
     export STEP="${STEP},6"        
     gcloud config set project $GCP_PROJECT > /dev/null 2>&1 
@@ -665,6 +684,9 @@ elif [ $MODE -eq 3 ]; then
     echo
     echo "$ kubectl -n $APPLICATION_NAMESPACE delete -f $HOME/istio-${ISTIO_VERSION}/samples/sleep/sleep.yaml # to delete application" | pv -qL 100
     kubectl -n $APPLICATION_NAMESPACE delete -f $HOME/istio-${ISTIO_VERSION}/samples/sleep/sleep.yaml
+    echo
+    echo "$ kubectl -n $APPLICATION_NAMESPACE delete deployment notsleep # to delete application" | pv -qL 100
+    kubectl -n $APPLICATION_NAMESPACE delete deployment notsleep
 else
     export STEP="${STEP},6i"   
     echo
@@ -760,14 +782,64 @@ start=`date +%s`
 source $PROJDIR/.env
 if [ $MODE -eq 1 ]; then
     export STEP="${STEP},9i"
+    echo
+    echo "$ kubectl apply -n \$APPLICATION_NAMESPACE -f - <<EOF
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: productpage-viewer
+  namespace: bookinfo
+spec:
+  selector:
+    matchLabels:
+      app: productpage
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        principals:
+        - cluster.local/ns/bookinfo/sa/sleep
+        - cluster.local/\$GATEWAY_SERVICE_ACCOUNT
+EOF" | pv -qL 100
+    echo
+    echo "$ kubectl -n \$APPLICATION_NAMESPACE exec deploy/sleep -- curl -s "http://\$GATEWAY_HOST/productpage" | grep -o \"<title>.*</title>\" # to confirm authorization policy. This should succeed" | pv -qL 100
+    echo
+    echo "$ kubectl -n \$APPLICATION_NAMESPACE exec deploy/sleep -- curl -s http://productpage:9080/productpage | grep -o \"<title>.*</title>\" # to confirm authorization policy. This should fail with a connection reset error code 56" | pv -qL 100
+    echo
+    echo "$ kubectl -n \$APPLICATION_NAMESPACE exec deploy/notsleep -- curl -s http://productpage:9080/productpage | grep -o \"<title>.*</title>\" # to confirm authorization policy. This should fail with a connection reset error code 56" | pv -qL 100
+    echo
+    echo "$ kubectl apply -n \$APPLICATION_NAMESPACE -f - <<EOF
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: productpage-viewer
+  namespace: bookinfo
+spec:
+  targetRefs:
+  - kind: Service
+    group: ""
+    name: productpage
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        principals:
+        - cluster.local/ns/bookinfo/sa/sleep
+    to:
+    - operation:
+        methods: [\"GET\"]
+EOF" | pv -qL 100
+    echo
+    echo "$ kubectl -n \$APPLICATION_NAMESPACE exec deploy/sleep -- curl -s "http://\$GATEWAY_HOST/productpage" -X DELETE # to the new waypoint proxy is enforcing the updated authorization policy. This should fail with an RBAC error because it is not a GET operation" | pv -qL 100
+    echo
+    echo "$ kubectl -n \$APPLICATION_NAMESPACE exec deploy/sleep -- curl -s http://\$GATEWAY_HOST/productpage | grep -o \"<title>.*</title>\" # to the new waypoint proxy is enforcing the updated authorization policy. This should continue to work" | pv -qL 100
+    echo
+    echo "$ kubectl -n \$APPLICATION_NAMESPACE delete AuthorizationPolicy productpage-viewer # to delete authorization policy" | pv -qL 100
 elif [ $MODE -eq 2 ]; then
     export STEP="${STEP},9"
     gcloud config set project $GCP_PROJECT  > /dev/null 2>&1
     kubectl config use-context gke_${GCP_PROJECT}_${GCP_ZONE}_${GCP_CLUSTER}  > /dev/null 2>&1
     gcloud --project $GCP_PROJECT container clusters get-credentials $GCP_CLUSTER  > /dev/null 2>&1
-    echo
-    echo "$ export INGRESS_HOST=\$(kubectl -n istio-system get service istio-ingressgateway -o jsonpath='{.status.loadBalancer.ingress[0].ip}') # to get ingress IP" | pv -qL 100
-    export INGRESS_HOST=$(kubectl -n istio-system get service istio-ingressgateway -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
     echo
     echo "$ export GATEWAY_HOST=bookinfo-gateway-istio.bookinfo # to set Kubernetes gateway" | pv -qL 100
     export GATEWAY_HOST=bookinfo-gateway-istio.bookinfo
@@ -906,6 +978,8 @@ start=`date +%s`
 source $PROJDIR/.env
 if [ $MODE -eq 1 ]; then
     export STEP="${STEP},10i"
+    echo
+    echo "$ kubectl -n \$APPLICATION_NAMESPACE exec deploy/sleep -- sh -c \"while true; do curl -s -o /dev/null http://\${GATEWAY_HOST}/productpage ; sleep 2; done &\" > /dev/null 2>&1 & # visit Kiali to confirm 10% of the traffic from 1000 requests goes to reviews-v2" | pv -qL 100
 elif [ $MODE -eq 2 ]; then
     export STEP="${STEP},10"
     gcloud config set project $GCP_PROJECT  > /dev/null 2>&1
